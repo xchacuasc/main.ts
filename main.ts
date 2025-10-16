@@ -1,20 +1,71 @@
 // main.ts
-// 改为使用 Deno Deploy 支持的 Deno.serve(handler)，避免构建失败
-
 // --- 后端核心逻辑 ---
-// 原始逻辑：发送请求到 chatgpt.com 未公开结账接口（⚠️ 不建议上线）
-// ✅ 演示逻辑：返回 5 条假链接，便于前后端演示部署
 async function generateCheckoutLinks(authToken: string): Promise<string[]> {
     if (!authToken || !authToken.startsWith("Bearer ")) {
         return ["错误：Authorization Token 格式不正确。它应该以 'Bearer ' 开头。"];
     }
 
+    const apiEndpoint = 'https://chatgpt.com/backend-api/payments/checkout';
+
+    const headers = {
+        'accept': '*/*',
+        'accept-language': 'zh-CN,zh;q=0.9',
+        'authorization': authToken,
+        'content-type': 'application/json',
+        'origin': 'https://chatgpt.com',
+        'referer': 'https://chatgpt.com/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+    };
+
+    const jsonData = {
+        'plan_name': 'chatgptteamplan',
+        'team_plan_data': {
+            'workspace_name': 'MyAwesomeTeam',
+            'price_interval': 'month',
+            'seat_quantity': 5,
+        },
+        'billing_details': {
+            'country': 'JP',
+            'currency': 'USD',
+        },
+        'cancel_url': 'https://chatgpt.com/',
+        'promo_campaign': 'team-1-month-free',
+        'checkout_ui_mode': 'redirect',
+    };
+
     const numLinks = 5;
     const results: string[] = [];
+
+    console.log(`正在为 Token: ${authToken.substring(0, 15)}... 生成 ${numLinks} 个链接...`);
+
     for (let i = 0; i < numLinks; i++) {
-        results.push(`链接 ${i + 1}: https://example.com/checkout/${crypto.randomUUID()}`);
+        try {
+            const response = await fetch(apiEndpoint, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(jsonData),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                results.push(`链接 ${i + 1} 生成失败: HTTP ${response.status} - ${errorText}`);
+                continue;
+            }
+
+            const responseData = await response.json();
+            const sessionId = responseData["checkout_session_id"];
+            if (sessionId) {
+                const url = `https://chatgpt.com/checkout/openai_llc/${sessionId}`;
+                results.push(`链接 ${i + 1}: ${url}`);
+            } else {
+                results.push(`链接 ${i + 1} 生成失败: 响应中找不到 checkout_session_id`);
+            }
+        } catch (error) {
+            results.push(`链接 ${i + 1} 生成时发生网络错误: ${error.message}`);
+        }
     }
 
+    console.log("生成完毕。");
     return results;
 }
 
@@ -42,10 +93,9 @@ async function handler(req: Request): Promise<Response> {
     });
 }
 
-// --- 前端页面 (HTML, CSS, JS) ---
+// --- HTML ---
 function getHtmlPage(): string {
-    return `
-<!DOCTYPE html>
+    return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -75,12 +125,16 @@ function getHtmlPage(): string {
             margin-bottom: 1.5rem;
         }
         .warning {
-            background-color: #f7d6b2;
-            color: #3b210f;
+            background-color: #f7b2b2;
+            color: #5c1a1a;
             padding: 1rem;
             border-radius: 4px;
             margin-bottom: 1.5rem;
-            border: 1px solid #e0b98b;
+            border: 1px solid #e08b8b;
+        }
+        .warning a {
+            color: #3b0f0f;
+            font-weight: bold;
         }
         .input-group {
             margin-bottom: 1.5rem;
@@ -132,13 +186,14 @@ function getHtmlPage(): string {
 </head>
 <body>
     <div class="container">
-        <h1>ChatGPT Team 链接生成器（演示）</h1>
+        <h1>ChatGPT Team 链接生成器</h1>
         <div class="warning">
-            本工具为技术演示版本，生成的链接仅为占位符，未调用任何真实 API。
+            <strong>警告：</strong> 你的 Authorization Token 非常敏感，相当于账户密码。请勿泄露给任何人。此工具仅为技术展示，使用它可能违反 OpenAI 服务条款，并可能导致账户被封锁。请自行承担风险。
+            <br/>请先访问 <a href=" " target="_blank">这个链接</a >，然后将页面中的 "accessToken" 的值完整复制到下面的输入框。
         </div>
         <div class="input-group">
-            <label for="authToken">输入 Access Token（可用占位值）：</label>
-            <input type="password" id="authToken" placeholder="如 Bearer abc...">
+            <label for="authToken">输入你的 Access Token:</label>
+            <input type="password" id="authToken" placeholder="请粘贴从 session 链接中获取的 accessToken 值">
         </div>
         <button id="generateButton">生成付款链接</button>
         <div id="results-area">点击按钮后，结果将会显示在这里...</div>
@@ -150,7 +205,12 @@ function getHtmlPage(): string {
 
         generateButton.addEventListener('click', async () => {
             const rawToken = authTokenInput.value.trim();
-            const token = rawToken.startsWith("Bearer ") ? rawToken : "Bearer " + rawToken;
+            if (!rawToken) {
+                resultsArea.textContent = "错误：请先输入你的 Access Token。";
+                return;
+            }
+
+            const token = 'Bearer ' + rawToken;
 
             generateButton.disabled = true;
             generateButton.textContent = '正在生成中...';
@@ -160,17 +220,19 @@ function getHtmlPage(): string {
                 const response = await fetch('/api/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ token })
+                    body: JSON.stringify({ token: token })
                 });
 
                 const data = await response.json();
+
                 if (response.ok) {
                     resultsArea.textContent = data.results.join('\\n');
                 } else {
                     resultsArea.textContent = '服务器错误: ' + (data.error || '未知错误');
                 }
+
             } catch (error) {
-                resultsArea.textContent = '发生网络错误: ' + error.message;
+                resultsArea.textContent = '发生网络错误，无法连接到服务器: ' + error.message;
             } finally {
                 generateButton.disabled = false;
                 generateButton.textContent = '生成付款链接';
@@ -178,9 +240,8 @@ function getHtmlPage(): string {
         });
     </script>
 </body>
-</html>
-`;
+</html>`;
 }
 
-// ✅ 启动：Deno Deploy 推荐方式（不要用 std serve）
+// ✅ Deno Deploy 入口，最小修改，替代 serve()
 Deno.serve(handler);
